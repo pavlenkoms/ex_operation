@@ -24,7 +24,7 @@ defmodule ExOperation.DSL do
     [operation_id | wrapper_ids] = Enum.reverse(operation.ids)
     step_key = wrapper_ids |> Enum.reduce({operation_id, name}, fn id, acc -> {id, acc} end)
 
-    fun = fn txn -> txn |> Helpers.transform_txn(operation) |> callback.() end
+    fun = fn _repo, txn -> txn |> Helpers.transform_txn(operation) |> callback.() end
 
     %{operation | multi: operation.multi |> Ecto.Multi.run(step_key, fun)}
   end

@@ -39,9 +39,10 @@ defmodule ExOperation.MixProject do
 
   defp deps do
     [
-      {:ecto, "~> 2.1"},
-      {:params, "~> 2.0"},
+      {:ecto, ">= 2.0.0 and < 4.0.0"},
+      {:params, github: "vic/params"},
       {:postgrex, "~> 0.13", optional: true},
+      {:ecto_sql, "~> 3.0", only: [:test]},
       {:credo, "~> 0.9", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.18", only: :dev, runtime: false}
     ]
