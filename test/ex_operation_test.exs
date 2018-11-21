@@ -1,6 +1,10 @@
 defmodule ExOperationTest do
   use ExOperation.TestCase, async: true
 
+  ########
+  # Step #
+  ########
+
   defmodule DummyOperation do
     use ExOperation.Operation, params: %{message!: :string}
     import Ecto.Changeset
@@ -50,6 +54,44 @@ defmodule ExOperationTest do
     result = FailingOperation |> ExOperation.run(%{}, %{})
     assert result == {:error, {:main, :result}, :failed, %{}}
   end
+
+  defmodule StepWithBadReturnOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> step(:result, fn _ -> :wrong end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.StepWithBadReturnOperation` in step `:result`:\n\(Elixir.ExOperation.AssertionError\) Expected `{:ok, result}` or {:error, reason}`. Got `:wrong`./
+
+  test "raise on bad return from step" do
+    assert_raise ExOperation.StepError, @error_regex, fn ->
+      StepWithBadReturnOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  defmodule RaisingStepOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> step(:result, fn _ -> raise "It failed" end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.RaisingStepOperation` in step `:result`:\n\(Elixir.RuntimeError\) It failed/
+
+  test "raise inside step" do
+    assert_raise ExOperation.StepError, @error_regex, fn ->
+      RaisingStepOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  ########
+  # Find #
+  ########
 
   defmodule FinderOperation do
     use ExOperation.Operation, params: %{id!: :integer}
@@ -106,6 +148,10 @@ defmodule ExOperationTest do
     assert {:ok, txn} = DeepFinderOperation |> ExOperation.run(%{}, params)
     assert txn.user |> is_nil()
   end
+
+  ################
+  # Suboperation #
+  ################
 
   defmodule SubOperation do
     use ExOperation.Operation, params: %{message!: :string}
@@ -186,21 +232,9 @@ defmodule ExOperationTest do
     assert txn.sub2.sub1.result == "hello"
   end
 
-  defmodule AfterCommitOperation do
-    use ExOperation.Operation
-
-    def call(operation) do
-      operation
-      |> step(:user, fn _ -> %ExOperation.Test.User{} |> ExOperation.Test.Repo.insert() end)
-      |> after_commit(&(operation.context.pid |> send(&1.user)))
-    end
-  end
-
-  test "call after commit hook" do
-    assert {:ok, _txn} = AfterCommitOperation |> ExOperation.run(%{pid: self()}, %{})
-    assert_receive %ExOperation.Test.User{id: id}
-    assert id
-  end
+  ######################################
+  # Suboperation with context override #
+  ######################################
 
   defmodule ContextOverrideSubOperation do
     use ExOperation.Operation, params: %{id: :integer}
@@ -254,6 +288,124 @@ defmodule ExOperationTest do
     assert txn.sub.user.name == "John Doe"
     assert txn.sub.passed_value == :bar
   end
+
+  #########
+  # Defer #
+  #########
+
+  defmodule DeferOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> step(:some_key, fn _ -> {:ok, :some_value} end)
+      |> defer(fn
+        op, %{some_key: :some_value} -> op |> step(:result, fn _ -> {:ok, :correct} end)
+        op, _ -> op
+      end)
+    end
+  end
+
+  test "defer" do
+    assert {:ok, %{result: :correct}} = DeferOperation |> ExOperation.run(%{}, %{})
+  end
+
+  defmodule DeferWithBadReturnOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> defer(fn _, _ -> :wrong end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.DeferWithBadReturnOperation` in defer callback:\n\(Elixir.ExOperation.AssertionError\) Expected `%ExOperation.Operation{}`. Got `:wrong`./
+
+  test "raise on bad return from defer callback" do
+    assert_raise ExOperation.DeferError, @error_regex, fn ->
+      DeferWithBadReturnOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  defmodule RaisingDeferOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> defer(fn _, _ -> raise "It failed" end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.RaisingDeferOperation` in defer callback:\n\(Elixir.RuntimeError\) It failed/
+
+  test "raise inside defer callback" do
+    assert_raise ExOperation.DeferError, @error_regex, fn ->
+      RaisingDeferOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  ######################
+  # After commit hooks #
+  ######################
+
+  defmodule AfterCommitOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> step(:some_step, fn _ -> {:ok, :some_result} end)
+      |> after_commit(&{:ok, &1 |> Map.put(:first_callback, true)})
+      |> after_commit(fn
+        %{first_callback: true} = txn -> {:ok, txn |> Map.put(:second_callback, true)}
+        _ -> raise "No first callback"
+      end)
+    end
+  end
+
+  test "call after commit hook" do
+    assert {:ok, txn} = AfterCommitOperation |> ExOperation.run(%{}, %{})
+    assert txn[:some_step]
+    assert txn[:first_callback]
+    assert txn[:second_callback]
+  end
+
+  defmodule AfterCommitWithBadReturnOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> after_commit(fn _ -> :wrong end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.AfterCommitWithBadReturnOperation` in after commit callback:\n\(Elixir.ExOperation.AssertionError\) Expected `{:ok, result}` or {:error, reason}`. Got `:wrong`./
+
+  test "raise on bad return from after commit callback" do
+    assert_raise ExOperation.AfterCommitError, @error_regex, fn ->
+      AfterCommitWithBadReturnOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  defmodule RaisingAfterCommitOperation do
+    use ExOperation.Operation
+
+    def call(operation) do
+      operation
+      |> after_commit(fn _ -> raise "It failed" end)
+    end
+  end
+
+  @error_regex ~r/Error in `ExOperationTest.RaisingAfterCommitOperation` in after commit callback:\n\(Elixir.RuntimeError\) It failed/
+
+  test "raise inside after commit callback" do
+    assert_raise ExOperation.AfterCommitError, @error_regex, fn ->
+      RaisingAfterCommitOperation |> ExOperation.run(%{}, %{})
+    end
+  end
+
+  ########
+  # Repo #
+  ########
 
   test "return the configured repo" do
     assert ExOperation.repo() == ExOperation.Test.Repo
